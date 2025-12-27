@@ -1,21 +1,33 @@
-fastapi==0.115.6
-uvicorn==0.34.0
-pydantic>=2.10.6,<3
+# Core web
+fastapi
+uvicorn
 
-pandas==2.2.3
-openpyxl==3.1.5
-pypdf==5.1.0
-docx2txt==0.8
+# Validation
+pydantic>=2.10,<3
 
-langchain==0.3.12
-langchain-community==0.3.12
-langchain-core==0.3.25
-langchain-text-splitters==0.3.3
-langchain-google-genai==2.0.7
-faiss-cpu==1.9.0.post1
+# LangChain core
+langchain
+langchain-community
+langchain-text-splitters
+langchain-huggingface
+langchain-google-genai
 
-crewai==1.7.2
-tavily-python>=0.7.17
+# Vector search (keep, no pin)
+faiss-cpu
+
+# File handling
+pypdf
+docx2txt
+pandas
+openpyxl
+
+# Embeddings
+sentence-transformers
+
+# Agents & tools (added safely)
+crewai
+tavily-python
+
 
 
 
