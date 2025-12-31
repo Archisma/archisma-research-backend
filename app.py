@@ -314,17 +314,26 @@ lineage_docs = load_text_files_as_documents(LINEAGE_DIR, "LINEAGE")
 lineage_store = FAISS.from_documents(lineage_docs, embeddings) if lineage_docs else None
 lineage_retriever = lineage_store.as_retriever(search_kwargs={"k": 5}) if lineage_store else None
 
+# ✅ UPDATED: Force Markdown TABLE output for Lineage (so frontend can render it as a table)
 lineage_prompt = ChatPromptTemplate.from_template("""
 You are a data lineage assistant.
 Use ONLY the lineage context provided.
 
-Return in this format:
+Return your answer STRICTLY as a MARKDOWN TABLE with exactly 2 columns:
+| Section | Details |
+
+And exactly these six rows in this order:
 1) Sources (feeds/tables)
 2) Transformations (step-by-step)
 3) Targets (tables/metrics)
 4) Downstream Consumers (if any)
 5) Notes / Assumptions
 6) Evidence (artifact filenames you used)
+
+Rules:
+- Do NOT write anything outside the table.
+- Details cell should use bullet points separated using <br> so it stays readable inside one table cell.
+- Evidence must list the exact artifact filenames.
 
 Context:
 {context}
