@@ -1,0 +1,10 @@
+{
+  "metric": "daily_active_users",
+  "source_table": "aurora_login_events",
+  "target_table": "aurora_daily_metrics",
+  "transformations": [
+    "Filter login events",
+    "Group by date and region",
+    "Count distinct users"
+  ]
+}

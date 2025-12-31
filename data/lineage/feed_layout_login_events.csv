@@ -1,0 +1,8 @@
+field_name,data_type,nullable,description
+event_date,DATE,false,UTC date when the login event occurred
+event_timestamp,TIMESTAMP,false,Exact timestamp of login event
+user_id,STRING,false,Unique identifier of the user
+event_type,STRING,false,Type of event (login/logout)
+device_type,STRING,true,Device used (web/ios/android)
+region,STRING,true,Geographic region of the user
+source_system,STRING,false,Upstream source system name
