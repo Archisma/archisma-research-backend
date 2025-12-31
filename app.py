@@ -2,6 +2,9 @@ import os
 import time
 import pandas as pd
 
+# ✅ NEW imports (safe, stdlib)
+import glob
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -30,6 +33,10 @@ PDF_PATH  = os.path.join(BASE_DIR, "aurora_systems_full_policy_manual.pdf")
 DOCX_PATH = os.path.join(BASE_DIR, "aurora_systems_long_term_strategy.docx")
 XLSX_PATH = os.path.join(BASE_DIR, "aurora_systems_operational_financials.xlsx")
 
+# ✅ NEW dirs for Lineage + Incidents
+LINEAGE_DIR  = os.path.join(BASE_DIR, "lineage")
+INCIDENT_DIR = os.path.join(BASE_DIR, "incidents")
+
 # Render env vars (set in Render dashboard)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
@@ -40,7 +47,7 @@ if not GEMINI_API_KEY:
 # =========================
 # FASTAPI APP
 # =========================
-app = FastAPI(title="Archisma Research Backend", version="1.0")
+app = FastAPI(title="Archisma Research Backend", version="1.1")
 
 # For Cloudflare Pages frontend calls:
 app.add_middleware(
@@ -56,6 +63,13 @@ class SearchReq(BaseModel):
 
 class PublicSearchReq(BaseModel):
     topic: str
+
+# ✅ NEW request models
+class LineageReq(BaseModel):
+    query: str
+
+class ProdIssueReq(BaseModel):
+    issue: str
 
 
 # =========================
@@ -151,7 +165,7 @@ rag_chain = (
 print("✅ RAG chain ready")
 
 # =========================
-# CrewAI + Tavily Tool
+# CrewAI + Tavily Tool (Public Search)
 # =========================
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
@@ -261,7 +275,6 @@ def run_crewai_public(topic: str) -> str:
         verbose=True
     )
 
-    # hard timeout guard (simple)
     start = time.time()
     result = crew.kickoff()
     elapsed = time.time() - start
@@ -275,12 +288,102 @@ def run_crewai_public(topic: str) -> str:
     return text
 
 
+# ============================================================
+# ✅ NEW: Lineage Vector Index (data/lineage/*)
+# ============================================================
+def load_text_files_as_documents(folder_path: str, label: str) -> list:
+    docs_local = []
+    if not os.path.isdir(folder_path):
+        print(f"⚠️ Folder missing: {folder_path}")
+        return docs_local
+
+    for p in glob.glob(os.path.join(folder_path, "*.*")):
+        try:
+            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            docs_local.append(Document(
+                page_content=f"{label}_FILE: {os.path.basename(p)}\n\n{content}",
+                metadata={"source": p, "type": label}
+            ))
+        except Exception as e:
+            print(f"⚠️ Failed reading {label} file {p}: {e}")
+    print(f"✅ Loaded {len(docs_local)} {label} files from {folder_path}")
+    return docs_local
+
+lineage_docs = load_text_files_as_documents(LINEAGE_DIR, "LINEAGE")
+lineage_store = FAISS.from_documents(lineage_docs, embeddings) if lineage_docs else None
+lineage_retriever = lineage_store.as_retriever(search_kwargs={"k": 5}) if lineage_store else None
+
+lineage_prompt = ChatPromptTemplate.from_template("""
+You are a data lineage assistant.
+Use ONLY the lineage context provided.
+
+Return in this format:
+1) Sources (feeds/tables)
+2) Transformations (step-by-step)
+3) Targets (tables/metrics)
+4) Downstream Consumers (if any)
+5) Notes / Assumptions
+6) Evidence (artifact filenames you used)
+
+Context:
+{context}
+
+Question:
+{question}
+""")
+
+# ============================================================
+# ✅ NEW: Incident/RCA Vector Index (data/incidents/*.md)
+# ============================================================
+incident_docs = load_text_files_as_documents(INCIDENT_DIR, "INCIDENT")
+incident_store = FAISS.from_documents(incident_docs, embeddings) if incident_docs else None
+
+# distance threshold: smaller = better match. Adjust if needed.
+INCIDENT_MAX_DISTANCE = float(os.environ.get("INCIDENT_MAX_DISTANCE", "0.90"))
+
+incident_prompt = ChatPromptTemplate.from_template("""
+You are a production support assistant.
+Use ONLY the internal incident/RCA context provided.
+
+Return in this format:
+- Closest Historical Match (incident id / title)
+- Likely Root Cause
+- Proven Resolution Steps (numbered)
+- Validation Checklist
+- Evidence (incident filenames used)
+
+Context:
+{context}
+
+Issue:
+{question}
+""")
+
+def try_internal_incident_match(issue_text: str) -> tuple[str | None, float | None]:
+    if not incident_store:
+        return None, None
+
+    pairs = incident_store.similarity_search_with_score(issue_text, k=3)
+    if not pairs:
+        return None, None
+
+    best_doc, best_score = pairs[0]
+    # If best_score too large, treat as "no match"
+    if best_score is None or best_score > INCIDENT_MAX_DISTANCE:
+        return None, best_score
+
+    ctx = "\n\n---\n\n".join([d.page_content for (d, s) in pairs])
+    resp = (incident_prompt | llm).invoke({"context": ctx, "question": issue_text})
+    return resp.content, best_score
+
+
 # =========================
 # ENDPOINTS
 # =========================
 @app.get("/")
 def root():
-    return {"ok": True, "message": "Archisma Research Backend is running. Use /health, /search, /public_search"}
+    return {"ok": True, "message": "Archisma Research Backend is running. Use /health, /search, /public_search, /lineage, /prod_issue"}
 
 @app.get("/health")
 def health():
@@ -289,6 +392,8 @@ def health():
         "docs_loaded": len(docs),
         "chunks": len(split_documents),
         "tavily_configured": bool(TAVILY_API_KEY),
+        "lineage_files_loaded": len(lineage_docs),
+        "incident_files_loaded": len(incident_docs),
     }
 
 @app.post("/search")
@@ -305,5 +410,50 @@ def public_search(req: PublicSearchReq):
         if not TAVILY_API_KEY:
             return {"answer": "Public search is not configured. Missing TAVILY_API_KEY on the server."}
         return {"answer": run_crewai_public(req.topic)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ✅ NEW: Lineage endpoint
+@app.post("/lineage")
+def lineage(req: LineageReq):
+    try:
+        if not lineage_retriever:
+            raise HTTPException(
+                status_code=500,
+                detail="Lineage artifacts not loaded. Create data/lineage and add dummy sql/json/csv files."
+            )
+
+        chain = (
+            {"context": lineage_retriever, "question": RunnablePassthrough()}
+            | lineage_prompt
+            | llm
+        )
+        resp = chain.invoke(req.query)
+        return {"answer": resp.content}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ✅ NEW: Production Issue endpoint (private-first + public fallback)
+@app.post("/prod_issue")
+def prod_issue(req: ProdIssueReq):
+    try:
+        issue_text = (req.issue or "").strip()
+        if not issue_text:
+            return {"answer": "Please paste an error / stack trace / log text."}
+
+        # 1) Private-first: internal incident match
+        internal_answer, score = try_internal_incident_match(issue_text)
+        if internal_answer:
+            return {"answer": f"{internal_answer}\n\n(Internal match distance: {score:.3f})"}
+
+        # 2) Fallback to public (your existing agent)
+        if not TAVILY_API_KEY:
+            return {"answer": f"No strong internal match found (distance: {score}). Public fallback is unavailable because TAVILY_API_KEY is missing."}
+
+        web_answer = run_crewai_public(f"Help troubleshoot this production issue:\n\n{issue_text}")
+        return {"answer": f"No strong internal match found (distance: {score}).\n\nPublic fallback:\n{web_answer}"}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
